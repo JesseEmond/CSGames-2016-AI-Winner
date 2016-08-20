@@ -1,116 +1,185 @@
 ; Dark JDIs solemnly swear that they are up to no good.
+
+; The general strategy is the following:
+; 1) Replicate.
+;    Copy our program somewhere else in memory (pseudorandom) and start a thread
+;    there. This is to ensure that we survive attacks.
+; 2) Attack. A couple of times.
+;    Pick a pseudorandom address and use the MMU to set a chunk of memory there
+;    to be no-exec, killing any program running there.
+; 3) Repeat.
+;    We don't want to die -- replicate again.
+
+; Note that every instruction is followed by the amount of bytes that it takes,
+; since we require the amount bytes of our program to be a multiple of 4 (to 
+; copy multiple bytes at once).
+
 .global start
 
 start:
-  MOV :thread $C
+  ; Start off by keeping track of the starting address of our program in
+  ; memory. We will be copying our program around, so we need to know where the
+  ; *current* program starts so that we know *where* to start copying from.
+  MOV :thread $C ;(6b)
 
 thread:
-  ; `MOV myaddr $C` will be injected here when duplicating (6b)
+  ; `MOV myaddr $C` (6b) will be injected here when duplicating ourself, so we
+  ; keep 6 NOPs as placeholders.
+  ; This will replicate what is being doing at the `start` label.
   NOP
   NOP
   NOP
   NOP
   NOP
   NOP
-
   ; $C has our address
 
-  ; replicate!
 
-  ; get a random addr
+  ;;;;;;;;;;;;;;
+  ; replicate! ;
+  ;;;;;;;;;;;;;;
+
+  ;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 1) Get a random address
+  ; Note: the clock changes per second..., so if we don't "seed" the clock
+  ; value with something unique per thread, we'll generate the same numbers on
+  ; each thread.
   MEMR [4] #0x20000100 $A ;read clock (6b)
-  ADD $C $A ;seed with our address (2b)
+  ADD $C $A               ;seed with our address (2b)
+
   ; C-like RNG with LCG gen
   MOV #1103515245 $B ;(6b)
-  MUL $B $A ;(2b)
-  ADD #12345 $A ;(6b)
-  ; modulo ~1Mb (a bit less so that we don't bust the mem)
-  MOV #0x99000 $B ;(6b)
-  DIV $A $B ;modulo is in B (2b)
-  ADD #0x40000000 $B ;start from first addr (6b)
-  ; $B is where we want to go
+  MUL $B $A          ;(2b)
+  ADD #12345 $A      ;(6b)
+
+  ; modulo ~1Mb, so that we don't try to copy outside the memory of the OS.
+  ; In fact, we modulo a bit less than that, because our program takes some
+  ; space by itself -- we wouldn't want to bust the memory as we're copying.
+  MOV #0x99000 $B    ;(6b)
+  DIV $A $B          ;modulo is in B (2b)
+  ADD #0x40000000 $B ;start from where the OS memory starts (6b)
+  ; $B is where we want to copy us over
 
   ; store in $S
   MOV $B $S ;(2b)
 
-  ; clean flags of future place
-  MEMW [4] $S #0x20000000 ;(6b)
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 2) Clean our future spot
+  ; clean flags of our future replica, to make sure that we *can* R/W/X there!
+  MEMW [4] $S #0x20000000      ;(6b)
   MEMW [2] #0xFFF0 #0x20000004 ;(10b)
   MEMW [2] #0x0000 #0x20000004 ;(10b)
-  MEMW [4] #0 #0x20000000 ;(10b)
+  MEMW [4] #0 #0x20000000      ;(10b)
 
-  ; tell our future self where it is
-  ; by writing a MOV ADDR $C
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 3) Craft `MOV myaddress $C` instruction
+  ; tell our future self where it is by crafting a `MOV ADDR $C` instruction.
+  
+  ; Craft first half of MOV instruction
   AND #0xFFFFFF00 $B ;first 3 bytes of addr (6b)
-  SHR #8 $B ;(6b)
-  OR #0x60000000 $B ;put MOV instr (6b)
+  SHR #8 $B          ;(6b)
+  OR #0x60000000 $B  ;add MOV instruction (6b)
   ; B contains first half
-  MEMW [4] $B $S ;(2b)
-  MOV $S $A ;(2b)
-  AND #0x000000FF $A ;last byte of addr (6b)
-  SHL #8 $A ;(6b)
-  OR #2 $A ;C register (6b)
-  ; A contains second half
-  MOV $S $B ;(2b)
-  ADD #4 $B ;(6b)
-  MEMW [2] $A $B ;(2b)
+  MEMW [4] $B $S     ;write it out to target destination (2b)
 
-  ; copy our instructions to new location
+  ; Craft second half of MOV instruction
+  MOV $S $A          ;(2b)
+  AND #0x000000FF $A ;last byte of addr (6b)
+  SHL #8 $A          ;(6b)
+  OR #2 $A           ;C register (6b)
+  ; A contains second half
+  MOV $S $B          ;take where we wrote the first half (2b)
+  ADD #4 $B          ;move it so that we can write that second half (6b)
+  MEMW [2] $A $B     ;write out the end of the MOV instruction (2b)
+
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 4) Copy our program to destination
   MOV $S $A ;A is the target address (2b)
-  ADD #6 $A ;move A after the MOV that we created (6b)
-  ADD #6 $C ;skip our MOV when copying (6b)
+  ADD #6 $A ;move A after the MOV that we created for the destination (6b)
+  ADD #6 $C ;skip our MOV from source when copying (6b)
 
   ; read bytes from our own memory
-  MEMR [4] $C $B ;(2b)
-  MEMW [4] $B $A ;(2b) ;copy them over
+  MEMR [4] $C $B     ;read bytes from ourself (2b)
+  MEMW [4] $B $A     ;copy bytes to target (2b)
+  ; we leave a mark at the end of our program to tell us that we are done
+  ; copying ourself.
   CMP #0x13374242 $B ;is this our mark? (6b)
-  JMPR <E> #18 ;we are done!! (6b)
-  ADD #4 $A ;(6b)
-  ADD #4 $C ;(6b)
-  JMPR <> #-34 ;go back to copying ! (6b)
+  JMPR <E> #18       ;we are done!! (6b)
+  ; not done -- next bytes!
+  ADD #4 $A          ;(6b)
+  ADD #4 $C          ;(6b)
+  JMPR <> #-34       ;go back to copying! (6b)
   
-  ; done copying. Start thread
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 5) Start thread at our new replica
   MEMW [4] $S #0x20000200 ;(6b)
 
-  ; attack !
-  MOV #3 $S ;number of attacks (6b)
 
-  ; get a random addr
+  ;;;;;;;;;;;
+  ; attack! ;
+  ;;;;;;;;;;;
+  MOV #3 $S ;number of attacks before going back to duplication (6b)
+
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 1) Get a random address block to attack
   MEMR [4] #0x20000100 $A ;read clock (6b)
-  ADD $C $A ;seed with the end of our program (2b)
+  ADD $C $A               ;seed with the end address of our program (2b)
+
   ; C-like RNG with LCG gen
   MOV #1103515245 $B ;(6b)
   MUL $B $A ;(2b)
   ADD #12345 $A ;(6b)
-  ; modulo ~1Mb (a bit less so that we don't bust the mem)
-  MOV #0x1000 $B ;(6b) a 256 block
-  DIV $A $B ;modulo is in B (2b)
-  ; convert from block to address
-  MOV #0x100 $A ;(6b)
-  MUL $A $B ;(2b)
-  ADD #0x40000000 $A ;start from first addr (6b)
+
+  ; modulo 4096 (1Mb max OS memory = 4096 blocks of 256 bytes), to target within
+  ; the OS memory.
+  MOV #0x1000 $B ;0x1000 possible blocks of 256 bytes (6b)
+  DIV $A $B      ;modulo is in B (2b)
+
+  ; convert from block to address -- we need to specify a block, but we want to
+  ; attack by blocks that end up on 256 bytes multiples.
+  MOV #0x100 $A      ;(6b)
+  MUL $A $B          ;(2b)
+  ADD #0x40000000 $A ;OS addresses start from 0x40000000 (6b)
   ; $A is where we want to hit
   
-  ; sorry, this is to fix lame order of operations with our OWN threads.
-  ; Otherwise, we'd trigger the MMU with a 0 in it, that WE put in there.
+
+  ; Through testing, we found that the ordering of operations of our OWN
+  ; threads was harming us. One of our threads would trigger the MMU while it
+  ; had a 0 in it (which was set by another of our threads while setting it up),
+  ; which instantly kills the calling thread (invalid MMU config). We found that
+  ; adding this padding changed the ordering in a way that saved us more
+  ; frequently.
   ; Let's not kill ourself. #MakeNOPGreatAgain
   NOP ;(1b)
   NOP ;(1b)
-  MEMW [2] #0x0000 #0x20000004 ;(10b)
-  MEMW [4] $A #0x20000000 ;(6b)
-  MEMW [2] #0xFF80 #0x20000004 ;(10b) you shall not execute
 
-  ; one attack completed. Keep track of it through $S
-  SUB #1 $S ;(6b)
-  CMP #0 $S ;(6b)
-  JMPR <E> #6 ;(6b)
 
-  ; back to attack
+  ; tell the MMU to set NOX on the target address
+  MEMW [2] #0x0000 #0x20000004 ;deactivate MMU while we modify it (10b)
+  MEMW [4] $A #0x20000000      ;set target address (6b)
+  MEMW [2] #0xFF80 #0x20000004 ;trigger MMU -- you shall not execute (10b)
+
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ; 3) Decide if we attack again or replicate
+  ; one attack completed.
+  SUB #1 $S   ;move counter (6b)
+  CMP #0 $S   ;are we done? (6b)
+  JMPR <E> #6 ;done! go spread. (6b)
+
+  ; not done? back to attacking!
   JMPR <> #-96 ;(6b)
 
-  ; back to spreading
+  ; back to spreading!
   JMPR <> #-292 ;(6b)
 
+
+  ;;;;;;;;;;;;;;;;;;;;;;;
+  ; mark end of program ;
+  ;;;;;;;;;;;;;;;;;;;;;;;
+  ; our whole program must be a multiple of 4 (we're copying in chunks of 4
+  ; bytes), so these NOPs act as padding.
   NOP
   NOP
-  .dataNumeric 0x13374242 ;WARNING!!! Whole payload must be a multiple of 4.
+
+  ; End of program marker -- this tells us when we're done copying.
+  .dataNumeric 0x13374242
