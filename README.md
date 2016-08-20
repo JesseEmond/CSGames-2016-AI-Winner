@@ -12,8 +12,8 @@ We were provided a assembly manual for a custom assembly on a custom "OS"
 
 The goal is simple: survive. Every team writes an assembly program, tournament
 brackets are created, and 1v1 matches occur : both programs are put in a shared
-`1Mb` memory space, taking turns at having executing time and the last one left
-executing wins the match.
+`1Mb` memory space, taking turns at having execution time and the last one left
+running wins the match.
 
 We are given the following tools:
 - `MMU` - We can set the permissions of memory pages, `256 bytes` at a time.
@@ -21,7 +21,7 @@ We are given the following tools:
 - `Threads` - We can launch threads. A program lives as long as it has a thread
               alive. The amount of instructions ran per "turn" is distributed
               among the threads of a program (i.e. you get additional 'lives',
-              but it becomes much harder to predict when you'll lost control of
+              but it becomes much harder to predict when you'll lose control of
               the CPU). We could have a maximum of 3 threads.
 - `Clock` - We can get the current seconds counter. This gives us the ability
             to generate pseudorandom numbers (although *seconds* were a bit too
@@ -29,7 +29,7 @@ We are given the following tools:
 
 ## Strategy
 Our winning strategy was to *spread and conquer*:
-- Replicate somewhere else a memory
+- Replicate somewhere else in memory
   - Generate a random address
   - Copy our program over to the target address
   - Start a thread there
@@ -37,6 +37,13 @@ Our winning strategy was to *spread and conquer*:
   - Generate a random target address
   - Remove `R/W/X` rights at the target address through the MMU
 - Repeat!
+
+
+The hardest part was to replicate. To know where to start copying, we need a
+start address. We can't use static assembly labels -- the emplacement of your
+code is dynamic (that's the whole *purpose* of replicating). Thus, we want to
+have a `MOV myaddress $C` instruction at the beginning. We needed to *craft*
+this multi-bytes instruction at the target address. No magic there, just tricky.
 
 
 ## Results
